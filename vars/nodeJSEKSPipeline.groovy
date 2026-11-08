@@ -28,7 +28,7 @@ def call(Map configMap){
                         // Access fields directly
                         appVersion = packageJson.version
                         echo "Building version ${appVersion}"
-                        sh 'printenv | sort'
+                        // sh 'printenv | sort'
                     }
                 }
             }
@@ -67,52 +67,79 @@ def call(Map configMap){
             stage("Quality Gate") {
                 steps {
                     timeout(time: 1, unit: 'HOURS') {
-                        waitForQualityGate abortPipeline: true
+                        def qg = waitForQualityGate()
+                        if (qg.status != 'OK') {
+                            utils.updateCommitStatus('failure', "SonarQube quality gate failed: ${qg.status}", 'sonar-scan')
+                            error "Quality gate failed: ${qg.status}"
+                        } else {
+                            utils.updateCommitStatus('success', 'SonarQube quality gate passed', 'sonar-scan')
+                        }
                     }
                 }
             }
             stage('Dependabot Alerts Check') {
                 steps {
+                    // withCredentials([string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')]) {
+                    //     script {
+                    //         def owner = 'daws-88s'
+                    //         def repo  = "${component}"
+
+                    //         def response = sh(
+                    //             script: """
+                    //                 curl -s -w "\\n%{http_code}" \\
+                    //                     -H "Authorization: Bearer ${GITHUB_TOKEN}" \\
+                    //                     -H "Accept: application/vnd.github+json" \\
+                    //                     -H "X-GitHub-Api-Version: 2022-11-28" \\
+                    //                     "https://api.github.com/repos/${owner}/${repo}/dependabot/alerts?severity=high,critical&state=open&per_page=100"
+                    //             """,
+                    //             returnStdout: true
+                    //         ).trim()
+
+                    //         def parts      = response.tokenize('\n')
+                    //         def httpStatus = parts[-1].trim()
+                    //         def body       = parts[0..-2].join('\n')
+
+                    //         if (httpStatus != '200') {
+                    //             error "GitHub API call failed with HTTP ${httpStatus}. Check token permissions (security_events scope required).\nResponse: ${body}"
+                    //         }
+
+                    //         def alerts = readJSON text: body
+
+                    //         if (alerts.size() == 0) {
+                    //             echo "✅ No HIGH or CRITICAL Dependabot alerts found. Pipeline continues."
+                    //         } else {
+                    //             echo "🚨 Found ${alerts.size()} HIGH/CRITICAL Dependabot alert(s):"
+                    //             alerts.each { alert ->
+                    //                 def pkg      = alert.security_vulnerability?.package?.name ?: 'unknown'
+                    //                 def severity = alert.security_advisory?.severity?.toUpperCase() ?: 'UNKNOWN'
+                    //                 def summary  = alert.security_advisory?.summary ?: 'No summary'
+                    //                 def fixedIn  = alert.security_vulnerability?.first_patched_version?.identifier ?: 'No fix available'
+                    //                 echo "  ❌ [${severity}] ${pkg} — ${summary} (Fixed in: ${fixedIn})"
+                    //             }
+                    //             error "Pipeline failed: ${alerts.size()} HIGH/CRITICAL Dependabot alert(s) detected."
+                    //         }
+                    //     }
+                    // }
                     withCredentials([string(credentialsId: 'github-token', variable: 'GITHUB_TOKEN')]) {
-                        script {
-                            def owner = 'daws-88s'
-                            def repo  = "${component}"
-
-                            def response = sh(
-                                script: """
-                                    curl -s -w "\\n%{http_code}" \\
-                                        -H "Authorization: Bearer ${GITHUB_TOKEN}" \\
-                                        -H "Accept: application/vnd.github+json" \\
-                                        -H "X-GitHub-Api-Version: 2022-11-28" \\
-                                        "https://api.github.com/repos/${owner}/${repo}/dependabot/alerts?severity=high,critical&state=open&per_page=100"
-                                """,
-                                returnStdout: true
-                            ).trim()
-
-                            def parts      = response.tokenize('\n')
-                            def httpStatus = parts[-1].trim()
-                            def body       = parts[0..-2].join('\n')
-
-                            if (httpStatus != '200') {
-                                error "GitHub API call failed with HTTP ${httpStatus}. Check token permissions (security_events scope required).\nResponse: ${body}"
-                            }
-
-                            def alerts = readJSON text: body
-
-                            if (alerts.size() == 0) {
-                                echo "✅ No HIGH or CRITICAL Dependabot alerts found. Pipeline continues."
-                            } else {
-                                echo "🚨 Found ${alerts.size()} HIGH/CRITICAL Dependabot alert(s):"
-                                alerts.each { alert ->
-                                    def pkg      = alert.security_vulnerability?.package?.name ?: 'unknown'
-                                    def severity = alert.security_advisory?.severity?.toUpperCase() ?: 'UNKNOWN'
-                                    def summary  = alert.security_advisory?.summary ?: 'No summary'
-                                    def fixedIn  = alert.security_vulnerability?.first_patched_version?.identifier ?: 'No fix available'
-                                    echo "  ❌ [${severity}] ${pkg} — ${summary} (Fixed in: ${fixedIn})"
-                                }
-                                error "Pipeline failed: ${alerts.size()} HIGH/CRITICAL Dependabot alert(s) detected."
-                            }
+                        def repoUrl = sh(script: 'git remote get-url origin', returnStdout: true).trim()
+                        def repoPath = repoUrl.replaceAll(/.*github\.com[\/:]/, '').replaceAll(/\.git$/, '')
+                        def alertCount = sh(
+                            script: """
+                                curl -sf \
+                                    -H "Authorization: Bearer \$GITHUB_TOKEN" \
+                                    -H "Accept: application/vnd.github+json" \
+                                    -H "X-GitHub-Api-Version: 2022-11-28" \
+                                    "https://api.github.com/repos/${repoPath}/dependabot/alerts?state=open&per_page=100" \
+                                | jq '[.[] | select(.security_vulnerability.severity == "high" or .security_vulnerability.severity == "critical")] | length'
+                            """,
+                            returnStdout: true
+                        ).trim()
+                        if (alertCount.toInteger() > 0) {
+                            utils.updateCommitStatus('failure', "${alertCount} HIGH/CRITICAL Dependabot alert(s) detected", 'library-scan')
+                            error("Build aborted: ${alertCount} HIGH/CRITICAL Dependabot alert(s) detected. Resolve them before proceeding.")
                         }
+                        utils.updateCommitStatus('success', 'Dependabot check passed — no HIGH/CRITICAL alerts', 'library-scan')
+                        echo "Dependabot check passed — no HIGH or CRITICAL vulnerabilities found."
                     }
                 }
             }
@@ -132,6 +159,43 @@ def call(Map configMap){
             }
             stage('Trivy OS Scan') {
                 steps {
+                    // script {
+                    //     // Generate table report
+                    //     sh """
+                    //         trivy image \
+                    //             --scanners vuln \
+                    //             --pkg-types os \
+                    //             --severity HIGH,MEDIUM \
+                    //             --format table \
+                    //             --output trivy-os-report.txt \
+                    //             --exit-code 0 \
+                    //             ${acc_id}.dkr.ecr.${region}.amazonaws.com/${project}/${component}:${appVersion}
+                    //     """
+
+                    //     // Print table to console
+                    //     sh 'cat trivy-os-report.txt'
+
+                    //     // Fail pipeline if vulnerabilities found
+                    //     def scanResult = sh(
+                    //         script: """
+                    //             trivy image \
+                    //                 --scanners vuln \
+                    //                 --pkg-types os \
+                    //                 --severity HIGH,MEDIUM \
+                    //                 --format table \
+                    //                 --exit-code 1 \
+                    //                 --quiet \
+                    //                 ${acc_id}.dkr.ecr.${region}.amazonaws.com/${project}/${component}:${appVersion}
+                    //         """,
+                    //         returnStatus: true
+                    //     )
+
+                    //     if (scanResult != 0) {
+                    //         error "🚨 Trivy found HIGH/MEDIUM OS vulnerabilities. Pipeline failed."
+                    //     } else {
+                    //         echo "✅ No HIGH or MEDIUM OS vulnerabilities found. Pipeline continues."
+                    //     }
+                    // }
                     script {
                         // Generate table report
                         sh """
@@ -164,8 +228,10 @@ def call(Map configMap){
                         )
 
                         if (scanResult != 0) {
+                            utils.updateCommitStatus('failure', 'Trivy OS scan: HIGH/MEDIUM vulnerabilities found', 'trivy-scan')
                             error "🚨 Trivy found HIGH/MEDIUM OS vulnerabilities. Pipeline failed."
                         } else {
+                            utils.updateCommitStatus('success', 'Trivy OS scan passed — no HIGH/MEDIUM vulnerabilities', 'trivy-scan')
                             echo "✅ No HIGH or MEDIUM OS vulnerabilities found. Pipeline continues."
                         }
                     }
@@ -205,13 +271,27 @@ def call(Map configMap){
             }
             stage ('Push image to ECR'){
                 steps {
-                script{
-                        withAWS(credentials: 'aws-creds', region: "${region}") {
-                            // Commands here have AWS authentication
-                            sh """
-                                aws ecr get-login-password --region ${region} | docker login --username AWS --password-stdin ${acc_id}.dkr.ecr.us-east-1.amazonaws.com
-                                docker push ${acc_id}.dkr.ecr.${region}.amazonaws.com/${project}/${component}:${appVersion}
-                            """
+                // script{
+                //         withAWS(credentials: 'aws-creds', region: "${region}") {
+                //             // Commands here have AWS authentication
+                //             sh """
+                //                 aws ecr get-login-password --region ${region} | docker login --username AWS --password-stdin ${acc_id}.dkr.ecr.us-east-1.amazonaws.com
+                //                 docker push ${acc_id}.dkr.ecr.${region}.amazonaws.com/${project}/${component}:${appVersion}
+                //             """
+                //         }
+                //     }
+                    script {
+                        try {
+                            withAWS(credentials: 'aws-creds', region: "${region}") {
+                                sh """
+                                    aws ecr get-login-password --region ${region} | docker login --username AWS --password-stdin ${acc_id}.dkr.ecr.us-east-1.amazonaws.com
+                                    docker push ${acc_id}.dkr.ecr.${region}.amazonaws.com/${project}/${component}:${appVersion}
+                                """
+                            }
+                            utils.updateCommitStatus('success', "Image ${appVersion} pushed to ECR", 'push-image')
+                        } catch (err) {
+                            utils.updateCommitStatus('failure', 'Failed to push image to ECR', 'push-image')
+                            throw err
                         }
                     }
                 }
