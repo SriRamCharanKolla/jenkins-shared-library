@@ -28,6 +28,7 @@ def call(Map configMap){
                         // Access fields directly
                         appVersion = packageJson.version
                         echo "Building version ${appVersion}"
+                        sh 'printenv | sort'
                     }
                 }
             }
